@@ -98,7 +98,6 @@ jobs:
               </application>
           </manifest>
           EOF
-          
           cat > app/src/main/java/com/example/vidsafe/Downloader.kt <<'EOF'
           package com.example.vidsafe
 
@@ -116,18 +115,15 @@ jobs:
           import java.net.URL
           import java.util.concurrent.ConcurrentHashMap
 
-          /** Downloads direct video files and plain (unencrypted) HLS streams into app-private storage. */
           object Downloader {
               private class H(val ua: String?, val ref: String?, val cookie: String?)
 
               private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
               private val main = Handler(Looper.getMainLooper())
 
-              /** file name -> percent */
               val active = ConcurrentHashMap<String, Int>()
               @Volatile var onUpdate: (() -> Unit)? = null
 
-              /** Private folder: not visible in gallery or file managers. */
               fun dir(ctx: Context) = File(ctx.filesDir, "videos").apply { mkdirs() }
 
               private fun toast(ctx: Context, msg: String) =
@@ -195,7 +191,7 @@ jobs:
               private fun hls(url0: String, part: File, name: String, h: H) {
                   var url = url0
                   var pl = text(url, h)
-                  if (pl.contains("#EXT-X-STREAM-INF")) { // master playlist -> pick best quality
+                  if (pl.contains("#EXT-X-STREAM-INF")) {
                       val lines = pl.lines()
                       var best = -1L
                       var uri: String? = null
@@ -235,7 +231,6 @@ jobs:
               }
           }
           EOF
-          
           cat > app/src/main/java/com/example/vidsafe/MainActivity.kt <<'EOF'
           package com.example.vidsafe
 
@@ -421,7 +416,6 @@ jobs:
                   urlBar.setText(tabs[i].url)
                   updateBottom()
               }
-              
               // ================= tabs =================
 
               @SuppressLint("SetJavaScriptEnabled")
@@ -650,6 +644,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: VidSafe-apk
-                       updateBottom()
-              }
-              
+          path: app/build/outputs/apk/debug/app-debug.apk
