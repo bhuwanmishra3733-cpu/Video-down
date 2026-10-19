@@ -85,13 +85,14 @@ jobs:
                   android:label="VidSafe"
                   android:usesCleartextTraffic="true"
                   android:theme="@style/Theme.VidSafe">
-                  <activity android:name=".MainActivity" android:exported="true">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-                  <activity android:name=".BrowserActivity" android:exported="false" />
                   <activity android:name=".PlayerActivity" android:exported="false"
                       android:configChanges="orientation|screenSize|keyboardHidden" />
               </application>
@@ -142,7 +143,7 @@ jobs:
                   scope.launch {
                       try {
                           active[name] = 0; changed()
-                          toast(app, "Download shuru: $name")
+                          toast(app, "Download shuru ho gaya. Progress: neeche ⬇ Downloads button")
                           val h = H(userAgent, referer, cookie)
                           if (hls) hls(url, part, name, h) else direct(url, part, name, h)
                           part.renameTo(File(dir(app), name))
@@ -238,48 +239,135 @@ jobs:
           cat > app/src/main/java/com/example/vidsafe/MainActivity.kt <<'EOF'
           package com.example.vidsafe
 
+          import android.annotation.SuppressLint
           import android.content.ClipboardManager
           import android.content.Context
           import android.content.Intent
+          import android.graphics.Bitmap
+          import android.net.Uri
           import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.inputmethod.EditorInfo
+          import android.webkit.CookieManager
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebResourceResponse
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
           import android.widget.ArrayAdapter
           import android.widget.Button
           import android.widget.EditText
+          import android.widget.FrameLayout
           import android.widget.LinearLayout
           import android.widget.ListView
+          import android.widget.PopupMenu
+          import android.widget.ScrollView
           import android.widget.TextView
+          import android.widget.Toast
+          import androidx.activity.OnBackPressedCallback
           import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import java.io.File
 
+          class Tab(val web: WebView) {
+              var title = "New tab"
+              var url = ""
+              val found = LinkedHashSet<String>()
+          }
+
           class MainActivity : AppCompatActivity() {
+              private val home = "https://www.google.com"
+              private val exts = listOf(".mp4", ".m3u8", ".webm", ".mkv", ".mov")
+
+              private val tabs = ArrayList<Tab>()
+              private var cur = -1
+              private var inBrowser = false
+
+              private lateinit var title: TextView
+              private lateinit var urlBar: EditText
+              private lateinit var goBtn: Button
+              private lateinit var menuBtn: Button
+              private lateinit var homeView: LinearLayout
               private lateinit var list: ListView
+              private lateinit var browserView: LinearLayout
+              private lateinit var webHolder: FrameLayout
+              private lateinit var foundBtn: Button
+              private lateinit var dlBtn: Button
+
               private var files: List<File> = emptyList()
               private var activeCount = 0
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun lp(w: Int, h: Int, weight: Float = 0f) = LinearLayout.LayoutParams(w, h, weight)
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(16), dp(32), dp(16), dp(16))
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(32), 0, 0) }
+
+                  // ---- top bar ----
+                  val top = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(12), 0, dp(4), 0)
                   }
-                  root.addView(TextView(this).apply { text = "VidSafe - Private Videos"; textSize = 22f })
+                  title = TextView(this).apply { text = "VidSafe"; textSize = 22f }
+                  urlBar = EditText(this).apply {
+                      hint = "URL ya search"; setSingleLine()
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                      imeOptions = EditorInfo.IME_ACTION_GO
+                      visibility = View.GONE
+                  }
+                  goBtn = Button(this).apply { text = "Go"; visibility = View.GONE }
+                  menuBtn = Button(this).apply { text = "⋮"; textSize = 20f }
+                  top.addView(title, lp(0, -2, 1f))
+                  top.addView(urlBar, lp(0, -2, 1f))
+                  top.addView(goBtn)
+                  top.addView(menuBtn)
 
+                  // ---- home (downloaded videos) ----
+                  homeView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(12), dp(8)) }
                   val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  val browse = Button(this).apply { text = "Browser" }
-                  val paste = Button(this).apply { text = "Link paste" }
-                  row.addView(browse, LinearLayout.LayoutParams(0, -2, 1f))
-                  row.addView(paste, LinearLayout.LayoutParams(0, -2, 1f))
-                  root.addView(row)
-
+                  val browseBtn = Button(this).apply { text = "🌐 Browser" }
+                  val pasteBtn = Button(this).apply { text = "📋 Link paste" }
+                  row.addView(browseBtn, lp(0, -2, 1f))
+                  row.addView(pasteBtn, lp(0, -2, 1f))
                   list = ListView(this)
-                  root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+                  val emptyText = TextView(this).apply {
+                      text = "Abhi koi video nahi.\nBrowser se ya link paste karke download karo."
+                      gravity = Gravity.CENTER
+                      setPadding(dp(16), dp(32), dp(16), 0)
+                  }
+                  list.emptyView = emptyText
+                  homeView.addView(row)
+                  homeView.addView(list, lp(-1, 0, 1f))
+                  homeView.addView(emptyText)
+
+                  // ---- browser ----
+                  browserView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+                  webHolder = FrameLayout(this)
+                  val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  foundBtn = Button(this).apply { text = "🎬 Videos mili: 0" }
+                  dlBtn = Button(this).apply { text = "⬇ Downloads" }
+                  bottom.addView(foundBtn, lp(0, -2, 1f))
+                  bottom.addView(dlBtn, lp(0, -2, 1f))
+                  browserView.addView(webHolder, lp(-1, 0, 1f))
+                  browserView.addView(bottom)
+
+                  root.addView(top)
+                  root.addView(homeView, lp(-1, 0, 1f))
+                  root.addView(browserView, lp(-1, 0, 1f))
                   setContentView(root)
 
-                  browse.setOnClickListener { startActivity(Intent(this, BrowserActivity::class.java)) }
-                  paste.setOnClickListener { pasteDialog() }
+                  // ---- listeners ----
+                  menuBtn.setOnClickListener { showMenu() }
+                  browseBtn.setOnClickListener { openBrowser() }
+                  pasteBtn.setOnClickListener { pasteDialog() }
+                  goBtn.setOnClickListener { loadFromBar() }
+                  urlBar.setOnEditorActionListener { _, _, _ -> loadFromBar(); true }
+                  foundBtn.setOnClickListener { showFound() }
+                  dlBtn.setOnClickListener { showHome() }
                   list.setOnItemClickListener { _, _, pos, _ ->
                       val i = pos - activeCount
                       if (i >= 0) startActivity(Intent(this, PlayerActivity::class.java).putExtra("path", files[i].absolutePath))
@@ -292,6 +380,181 @@ jobs:
                           .setNegativeButton("Cancel", null).show()
                       true
                   }
+                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+                      override fun handleOnBackPressed() {
+                          if (inBrowser) {
+                              val t = tabs.getOrNull(cur)
+                              if (t != null && t.web.canGoBack()) t.web.goBack() else showHome()
+                          } else finish()
+                      }
+                  })
+
+                  showHome()
+              }
+
+              // ================= screens =================
+
+              private fun showHome() {
+                  inBrowser = false
+                  homeView.visibility = View.VISIBLE
+                  browserView.visibility = View.GONE
+                  title.visibility = View.VISIBLE
+                  urlBar.visibility = View.GONE
+                  goBtn.visibility = View.GONE
+                  refresh()
+              }
+
+              private fun openBrowser() {
+                  if (tabs.isEmpty()) addTab(home) else select(if (cur in tabs.indices) cur else 0)
+              }
+
+              private fun select(i: Int) {
+                  cur = i
+                  inBrowser = true
+                  homeView.visibility = View.GONE
+                  browserView.visibility = View.VISIBLE
+                  title.visibility = View.GONE
+                  urlBar.visibility = View.VISIBLE
+                  goBtn.visibility = View.VISIBLE
+                  webHolder.removeAllViews()
+                  webHolder.addView(tabs[i].web, FrameLayout.LayoutParams(-1, -1))
+                  urlBar.setText(tabs[i].url)
+                  updateBottom()
+              }
+              
+              // ================= tabs =================
+
+              @SuppressLint("SetJavaScriptEnabled")
+              private fun addTab(url: String) {
+                  val web = WebView(this)
+                  val tab = Tab(web)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.webChromeClient = WebChromeClient()
+                  web.webViewClient = object : WebViewClient() {
+                      override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                          val u = request.url.toString()
+                          val p = u.substringBefore('?').lowercase()
+                          if (exts.any { p.endsWith(it) }) runOnUiThread {
+                              if (tab.found.add(u)) updateBottom()
+                          }
+                          return null
+                      }
+                      override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                          tab.url = url
+                          tab.found.clear()
+                          if (tabs.getOrNull(cur) === tab) { urlBar.setText(url); updateBottom() }
+                      }
+                      override fun onPageFinished(view: WebView, url: String) {
+                          tab.title = view.title ?: url
+                      }
+                  }
+                  tabs.add(tab)
+                  select(tabs.size - 1)
+                  load(tab, url)
+              }
+
+              private fun closeTab(i: Int) {
+                  val wasCur = i == cur
+                  webHolder.removeView(tabs[i].web)
+                  tabs[i].web.destroy()
+                  tabs.removeAt(i)
+                  if (tabs.isEmpty()) { cur = -1; showHome(); return }
+                  if (i < cur) cur--
+                  if (wasCur) cur = minOf(i, tabs.size - 1)
+                  if (inBrowser) select(cur)
+              }
+
+              private fun showTabs() {
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
+                  val dlg = AlertDialog.Builder(this)
+                      .setTitle("Tabs (${tabs.size})")
+                      .setView(ScrollView(this).apply { addView(box) })
+                      .setPositiveButton("➕ Naya tab") { _, _ -> addTab(home) }
+                      .setNegativeButton("Band karo", null)
+                      .create()
+                  if (tabs.isEmpty()) {
+                      box.addView(TextView(this).apply { text = "Koi tab khula nahi hai" })
+                  }
+                  for (i in tabs.indices) {
+                      val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      val label = (if (i == cur && inBrowser) "● " else "") + tabs[i].title.ifBlank { "New tab" }.take(32)
+                      r.addView(Button(this).apply {
+                          text = label; isAllCaps = false
+                          gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                          setOnClickListener { dlg.dismiss(); select(i) }
+                      }, lp(0, -2, 1f))
+                      r.addView(Button(this).apply {
+                          text = "✕"
+                          setOnClickListener {
+                              dlg.dismiss()
+                              closeTab(i)
+                              if (tabs.isNotEmpty()) showTabs()
+                          }
+                      })
+                      box.addView(r)
+                  }
+                  dlg.show()
+              }
+
+              // ================= menu / actions =================
+
+              private fun showMenu() {
+                  val pm = PopupMenu(this, menuBtn)
+                  pm.menu.add(0, 1, 0, "🏠 Home (Downloads)")
+                  pm.menu.add(0, 2, 1, "🌐 Browser")
+                  pm.menu.add(0, 3, 2, "➕ Naya tab")
+                  pm.menu.add(0, 4, 3, "🗂 Tabs (${tabs.size})")
+                  pm.menu.add(0, 5, 4, "🔄 Reload")
+                  pm.menu.add(0, 6, 5, "📋 Link paste")
+                  pm.setOnMenuItemClickListener { item ->
+                      when (item.itemId) {
+                          1 -> showHome()
+                          2 -> openBrowser()
+                          3 -> addTab(home)
+                          4 -> showTabs()
+                          5 -> if (inBrowser) tabs.getOrNull(cur)?.web?.reload()
+                          6 -> pasteDialog()
+                      }
+                      true
+                  }
+                  pm.show()
+              }
+
+              private fun load(tab: Tab, s: String) {
+                  if (s.isEmpty()) return
+                  val u = when {
+                      s.startsWith("http") -> s
+                      s.contains(" ") || !s.contains(".") -> "https://www.google.com/search?q=" + Uri.encode(s)
+                      else -> "https://$s"
+                  }
+                  tab.web.loadUrl(u)
+              }
+
+              private fun loadFromBar() {
+                  tabs.getOrNull(cur)?.let { load(it, urlBar.text.toString().trim()) }
+              }
+
+              private fun showFound() {
+                  val t = tabs.getOrNull(cur) ?: return
+                  if (t.found.isEmpty()) {
+                      Toast.makeText(this, "Pehle page par video play karo, phir yahan aao", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val urls = t.found.toList()
+                  AlertDialog.Builder(this).setTitle("Download karo")
+                      .setItems(urls.toTypedArray()) { _, i ->
+                          val u = urls[i]
+                          Downloader.start(this, u, t.web.settings.userAgentString, t.web.url, CookieManager.getInstance().getCookie(u))
+                      }.show()
+              }
+
+              private fun updateBottom() {
+                  val t = tabs.getOrNull(cur)
+                  foundBtn.text = "🎬 Videos mili: ${t?.found?.size ?: 0}"
+                  val vals = Downloader.active.values
+                  dlBtn.text = if (vals.isEmpty()) "⬇ Downloads"
+                  else "⬇ Downloads (${vals.size}) ${vals.sum() / vals.size}%"
               }
 
               private fun pasteDialog() {
@@ -302,13 +565,15 @@ jobs:
                   AlertDialog.Builder(this).setTitle("Video link").setView(et)
                       .setPositiveButton("Download") { _, _ ->
                           val u = et.text.toString().trim()
-                          if (u.startsWith("http")) Downloader.start(this, u)
+                          if (u.startsWith("http")) { Downloader.start(this, u); showHome() }
                       }.setNegativeButton("Cancel", null).show()
               }
 
+              // ================= downloads list =================
+
               override fun onResume() {
                   super.onResume()
-                  Downloader.onUpdate = { refresh() }
+                  Downloader.onUpdate = { refresh(); updateBottom() }
                   refresh()
               }
 
@@ -325,112 +590,14 @@ jobs:
                   val labels = act + files.map { "${it.name}\n" + String.format("%.1f MB", it.length() / 1048576.0) }
                   list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
               }
+
+              override fun onDestroy() {
+                  tabs.forEach { it.web.destroy() }
+                  super.onDestroy()
+              }
           }
           EOF
 
-          cat > app/src/main/java/com/example/vidsafe/BrowserActivity.kt <<'EOF'
-          package com.example.vidsafe
-
-          import android.annotation.SuppressLint
-          import android.graphics.Bitmap
-          import android.net.Uri
-          import android.os.Bundle
-          import android.text.InputType
-          import android.view.inputmethod.EditorInfo
-          import android.webkit.CookieManager
-          import android.webkit.WebResourceRequest
-          import android.webkit.WebResourceResponse
-          import android.webkit.WebView
-          import android.webkit.WebViewClient
-          import android.widget.Button
-          import android.widget.EditText
-          import android.widget.LinearLayout
-          import android.widget.Toast
-          import androidx.activity.OnBackPressedCallback
-          import androidx.appcompat.app.AlertDialog
-          import androidx.appcompat.app.AppCompatActivity
-
-          class BrowserActivity : AppCompatActivity() {
-              private lateinit var web: WebView
-              private lateinit var btn: Button
-              private lateinit var et: EditText
-              private val found = LinkedHashSet<String>()
-              private val exts = listOf(".mp4", ".m3u8", ".webm", ".mkv", ".mov")
-
-              @SuppressLint("SetJavaScriptEnabled")
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 48, 0, 0) }
-                  val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  et = EditText(this).apply {
-                      hint = "URL ya search"; setSingleLine()
-                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                      imeOptions = EditorInfo.IME_ACTION_GO
-                  }
-                  val go = Button(this).apply { text = "Go" }
-                  bar.addView(et, LinearLayout.LayoutParams(0, -2, 1f))
-                  bar.addView(go)
-
-                  web = WebView(this)
-                  web.settings.javaScriptEnabled = true
-                  web.settings.domStorageEnabled = true
-                  web.webViewClient = object : WebViewClient() {
-                      override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                          val u = request.url.toString()
-                          val p = u.substringBefore('?').lowercase()
-                          if (exts.any { p.endsWith(it) }) runOnUiThread {
-                              if (found.add(u)) btn.text = "Videos mili: ${found.size} (dekhein)"
-                          }
-                          return null
-                      }
-                      override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-                          found.clear(); btn.text = "Videos mili: 0"; et.setText(url)
-                      }
-                  }
-
-                  btn = Button(this).apply { text = "Videos mili: 0" }
-                  root.addView(bar)
-                  root.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
-                  root.addView(btn)
-                  setContentView(root)
-
-                  go.setOnClickListener { load(et.text.toString().trim()) }
-                  et.setOnEditorActionListener { _, _, _ -> load(et.text.toString().trim()); true }
-                  btn.setOnClickListener { showFound() }
-                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-                      override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
-                  })
-                  load("https://www.google.com")
-              }
-
-              private fun load(s: String) {
-                  if (s.isEmpty()) return
-                  val u = when {
-                      s.startsWith("http") -> s
-                      s.contains(" ") || !s.contains(".") -> "https://www.google.com/search?q=" + Uri.encode(s)
-                      else -> "https://$s"
-                  }
-                  web.loadUrl(u)
-              }
-
-              private fun showFound() {
-                  if (found.isEmpty()) {
-                      Toast.makeText(this, "Pehle page par video play karo, phir yahan aao", Toast.LENGTH_LONG).show()
-                      return
-                  }
-                  val urls = found.toList()
-                  AlertDialog.Builder(this).setTitle("Download karo")
-                      .setItems(urls.toTypedArray()) { _, i ->
-                          val u = urls[i]
-                          Downloader.start(this, u, web.settings.userAgentString, web.url, CookieManager.getInstance().getCookie(u))
-                          Toast.makeText(this, "Download list mein dekho (back dabao)", Toast.LENGTH_SHORT).show()
-                      }.show()
-              }
-
-              override fun onDestroy() { web.destroy(); super.onDestroy() }
-          }
-          EOF
-          
           cat > app/src/main/java/com/example/vidsafe/PlayerActivity.kt <<'EOF'
           package com.example.vidsafe
 
@@ -483,5 +650,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: VidSafe-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          
+                       updateBottom()
+              }
+              
